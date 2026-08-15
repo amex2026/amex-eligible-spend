@@ -35,20 +35,41 @@
   .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .warn { color:#e3b341; }
   details summary { cursor:pointer; color:var(--mut); margin-top:12px; }
+  .howto { background:#1c1a10; border:1px solid #3a3315; border-left:3px solid #e3b341;
+           border-radius:10px; padding:14px 18px; margin-bottom:18px; }
+  .howto b { color:#e3b341; }
+  .howto ol { margin:8px 0 0; padding-left:20px; color:var(--fg); }
+  .howto li { margin:3px 0; }
+  .foot { color:var(--mut); font-size:12px; margin-top:22px; }
 </style>
 </head>
 <body>
 <h1>Amex Eligible Spend</h1>
-<div class="sub">Drop your American Express <em>Account Activity</em> PDF(s) below.
-  A transaction counts as eligible only if points are attached; negative points (refunds and
-  merchant credits) subtract. Everything runs locally in this page &mdash; no upload, no install.</div>
+<div class="sub">把 American Express 的 <em>账单 PDF</em> 拖到下面，自动算出这期有多少 eligible spend。<br>
+  规则：有积分的交易算 eligible，积分为负（退款/商户 credit）则从合计中扣减，无积分的交易剔除。<br>
+  <b>全部在本地计算</b> —— 不上传、无服务器、断网也能用。</div>
+
+<div class="howto">
+  <b>⚠️ PDF 要用「Print」导出，不是「Download」</b>
+  <ol>
+    <li>登录 Amex <b>网页版或手机 App</b> → <b>Statements &amp; Activity</b></li>
+    <li><b>先把日期筛选（Filter）调到覆盖你要统计的全部账期</b> —— 只看一期就只会算那一期</li>
+    <li>点 <b>Print</b>（<u>不要点 Download</u>）</li>
+    <li>务必勾选 <b>Additional Details</b> —— 积分信息在这里面，不勾就算不出来</li>
+    <li>另存为 PDF，然后拖到下面</li>
+  </ol>
+</div>
 
 <div id="drop">
-  <b>Choose PDFs</b> or drag &amp; drop them here
+  <b>选择 PDF</b> 或直接把文件拖到这里
   <input id="file" type="file" accept="application/pdf" multiple hidden>
 </div>
 
 <div id="out"></div>
+
+<div class="foot">
+  想确认它没偷偷传数据？断网再用一次，或按 F12 看 Network 面板 —— 全程零请求。源码 Ctrl+U 可直接通读，共 20 KB。
+</div>
 
 <script>
 /* Amex eligible-spend core: dependency-free PDF text extraction + analysis.
@@ -407,29 +428,29 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
     results.forEach(function (r, idx) {
       var s = r.summary;
       html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1>" +
-        '<button class="ghost" data-csv="' + idx + '">Download CSV</button></div>' +
-        (s.complete ? "" : '<div class="warn">⚠ parsed ' + s.transactions + " of " + s.amountLines +
-          " amount lines — result may be incomplete</div>") +
+        '<button class="ghost" data-csv="' + idx + '">导出 CSV</button></div>' +
+        (s.complete ? "" : '<div class="warn">⚠ 只解析出 ' + s.transactions + " of " + s.amountLines +
+          " 个金额行，结果可能不完整</div>") +
         '<div class="grid">' +
-        '<div class="kpi big"><span>Net eligible spend</span><strong>' + money(s.netEligibleSpend) + "</strong></div>" +
-        '<div class="kpi"><span>Eligible charges</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
-        '<div class="kpi"><span>Point-debited refunds</span><strong>' + money(s.eligibleRefunds) + "</strong></div>" +
-        '<div class="kpi"><span>Eligible / total</span><strong>' + s.eligibleCount + " / " + s.transactions + "</strong></div>" +
-        '<div class="kpi"><span>Net points</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>" +
+        '<div class="kpi big"><span>净 ELIGIBLE SPEND</span><strong>' + money(s.netEligibleSpend) + "</strong></div>" +
+        '<div class="kpi"><span>Eligible 消费</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
+        '<div class="kpi"><span>Eligible 退款</span><strong>' + money(s.eligibleRefunds) + "</strong></div>" +
+        '<div class="kpi"><span>Eligible / 总笔数</span><strong>' + s.eligibleCount + " / " + s.transactions + "</strong></div>" +
+        '<div class="kpi"><span>净积分</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>" +
         "</div>";
 
       var excluded = r.transactions.filter(function (t) { return !t.eligible; });
-      html += "<details open><summary>Excluded — no points (" + excluded.length + ")</summary><table>" +
-        "<tr><th>Date</th><th>Description</th><th class='num'>Amount</th></tr>";
+      html += "<details open><summary>已剔除 · 无积分 (" + excluded.length + ")</summary><table>" +
+        "<tr><th>日期</th><th>描述</th><th class='num'>金额</th></tr>";
       excluded.forEach(function (t) {
         html += "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.description) +
-          (t.pending ? ' <span class="tag">pending</span>' : "") +
+          (t.pending ? ' <span class="tag">待出账</span>' : "") +
           "</td><td class='num'>" + money(t.amount) + "</td></tr>";
       });
       html += "</table></details>";
 
-      html += "<details><summary>All transactions (" + r.transactions.length + ")</summary><table>" +
-        "<tr><th>Date</th><th>Description</th><th class='num'>Amount</th><th class='num'>Points</th><th>Eligible</th></tr>";
+      html += "<details><summary>全部交易 (" + r.transactions.length + ")</summary><table>" +
+        "<tr><th>日期</th><th>描述</th><th class='num'>金额</th><th class='num'>积分</th><th>Eligible</th></tr>";
       r.transactions.forEach(function (t) {
         html += "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.description) + "</td><td class='num'>" +
           money(t.amount) + "</td><td class='num'>" + t.points.toLocaleString("en-US") + "</td><td class='" +
@@ -440,7 +461,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
 
     if (results.length > 1) {
       var total = results.reduce(function (a, r) { return a + r.summary.netEligibleSpend; }, 0);
-      html += '<div class="card"><div class="kpi big"><span>Combined net eligible spend</span><strong>' +
+      html += '<div class="card"><div class="kpi big"><span>合计净 ELIGIBLE SPEND</span><strong>' +
         money(Math.round(total * 100) / 100) + "</strong></div></div>";
     }
     out.innerHTML = html;
@@ -466,7 +487,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
   }
 
   async function handle(files) {
-    out.innerHTML = '<div class="card">Parsing…</div>';
+    out.innerHTML = '<div class="card">解析中…</div>';
     results = [];
     for (var f of files) {
       try {
