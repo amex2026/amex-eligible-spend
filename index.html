@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Amex Eligible Spend</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#272b35; --fg:#e6e8ee; --mut:#8b93a7;
+          --ok:#3fb950; --bad:#f85149; --accent:#4c8dff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,
+         -apple-system,Segoe UI,Roboto,Helvetica,Arial; padding:32px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--mut); margin-bottom:24px; }
+  #drop { border:2px dashed var(--line); border-radius:12px; padding:44px; text-align:center;
+          cursor:pointer; transition:.15s; background:var(--card); }
+  #drop.hot { border-color:var(--accent); background:#1b2231; }
+  #drop b { color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:20px; margin-top:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; margin:14px 0; }
+  .kpi { background:#11141a; border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .kpi span { display:block; color:var(--mut); font-size:11px; text-transform:uppercase;
+              letter-spacing:.05em; margin-bottom:4px; }
+  .kpi strong { font-size:19px; font-variant-numeric:tabular-nums; }
+  .big strong { color:var(--accent); font-size:24px; }
+  table { width:100%; border-collapse:collapse; margin-top:10px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:600; font-size:12px; }
+  td.num { text-align:right; }
+  .yes { color:var(--ok); } .no { color:var(--bad); }
+  .tag { background:#3a2d10; color:#e3b341; border-radius:4px; padding:1px 6px; font-size:11px; }
+  button { background:var(--accent); border:0; color:#fff; padding:8px 14px; border-radius:8px;
+           cursor:pointer; font-size:13px; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--fg); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .warn { color:#e3b341; }
+  details summary { cursor:pointer; color:var(--mut); margin-top:12px; }
+</style>
+</head>
+<body>
+<h1>Amex Eligible Spend</h1>
+<div class="sub">Drop your American Express <em>Account Activity</em> PDF(s) below.
+  A transaction counts as eligible only if points are attached; negative points (refunds and
+  merchant credits) subtract. Everything runs locally in this page &mdash; no upload, no install.</div>
+
+<div id="drop">
+  <b>Choose PDFs</b> or drag &amp; drop them here
+  <input id="file" type="file" accept="application/pdf" multiple hidden>
+</div>
+
+<div id="out"></div>
+
+<script>
+/* Amex eligible-spend core: dependency-free PDF text extraction + analysis.
+ * Runs unmodified in a browser (inflate via DecompressionStream) and in Node
+ * (inflate via zlib). No third-party libraries.
+ *
+ * Eligibility rule: a transaction counts if points are attached to it. Points
+ * may be negative (return / merchant credit), which subtracts from the total.
+ * No points (payments, fees, transfers, statement credits, pending) => excluded.
+ */
+(function (root) {
+  "use strict";
+
+  // ---------- byte helpers ----------
+  function toLatin1(bytes) {
+    var out = "", CH = 0x8000;
+    for (var i = 0; i < bytes.length; i += CH) {
+      out += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    }
+    return out;
+  }
+  function fromLatin1(s) {
+    var a = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i) & 0xff;
+    return a;
+  }
+
+  // ---------- PDF object graph ----------
+  async function parseObjects(raw, inflate) {
+    var objs = new Map();
+    var re = /(\d+)\s+(\d+)\s+obj\b([\s\S]*?)\bendobj/g, m;
+    while ((m = re.exec(raw))) {
+      var num = parseInt(m[1], 10), body = m[3];
+      var sm = /stream\r?\n([\s\S]*?)\r?\nendstream/.exec(body);
+      var stream = null;
+      if (sm) {
+        stream = /FlateDecode/.test(body) ? await inflate(fromLatin1(sm[1])) : sm[1];
+      }
+      objs.set(num, { body: body, stream: stream });
+    }
+
+    // Expand /ObjStm containers so fonts stored inside become addressable.
+    for (var entry of Array.from(objs.entries())) {
+      var o = entry[1];
+      if (!o.stream || !/\/ObjStm/.test(o.body)) continue;
+      var n = /\/N\s+(\d+)/.exec(o.body), first = /\/First\s+(\d+)/.exec(o.body);
+      if (!n || !first) continue;
+      var off = parseInt(first[1], 10);
+      var nums = o.stream.slice(0, off).trim().split(/\s+/).map(Number);
+      for (var i = 0; i < parseInt(n[1], 10); i++) {
+        var onum = nums[2 * i], start = off + nums[2 * i + 1];
+        var stop = 2 * i + 3 < nums.length ? off + nums[2 * i + 3] : o.stream.length;
+        if (!objs.has(onum)) objs.set(onum, { body: o.stream.slice(start, stop), stream: null });
+      }
+    }
+    return objs;
+  }
+
+  // ---------- fonts / ToUnicode ----------
+  function hexToStr(h) {
+    if (h.length % 2) h += "0";
+    var out = "";
+    if (h.length >= 4) {
+      for (var i = 0; i + 3 < h.length; i += 4) out += String.fromCharCode(parseInt(h.substr(i, 4), 16));
+      return out;
+    }
+    return String.fromCharCode(parseInt(h, 16));
+  }
+
+  function parseCMap(stream) {
+    var cmap = new Map(), m, t;
+    var bfchar = /beginbfchar([\s\S]*?)endbfchar/g;
+    while ((m = bfchar.exec(stream))) {
+      var toks = m[1].match(/<([0-9A-Fa-f]+)>/g) || [];
+      for (var i = 0; i + 1 < toks.length; i += 2) {
+        cmap.set(parseInt(toks[i].slice(1, -1), 16), hexToStr(toks[i + 1].slice(1, -1)));
+      }
+    }
+    var bfrange = /beginbfrange([\s\S]*?)endbfrange/g;
+    while ((m = bfrange.exec(stream))) {
+      var r = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(?:<([0-9A-Fa-f]+)>|\[([\s\S]*?)\])/g;
+      while ((t = r.exec(m[1]))) {
+        var lo = parseInt(t[1], 16), hi = parseInt(t[2], 16);
+        if (t[3]) {
+          var base = parseInt(t[3], 16);
+          for (var k = 0; k <= hi - lo; k++) cmap.set(lo + k, String.fromCharCode(base + k));
+        } else if (t[4]) {
+          (t[4].match(/<([0-9A-Fa-f]+)>/g) || []).forEach(function (tok, k) {
+            cmap.set(lo + k, hexToStr(tok.slice(1, -1)));
+          });
+        }
+      }
+    }
+    return cmap;
+  }
+
+  function fontMaps(objs) {
+    var byObj = new Map();
+    objs.forEach(function (o, num) {
+      if (!/\/Font/.test(o.body) || !/\/ToUnicode/.test(o.body)) return;
+      var ref = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(o.body);
+      if (!ref) return;
+      var target = objs.get(parseInt(ref[1], 10));
+      if (!target || !target.stream) return;
+      var cmap = parseCMap(target.stream);
+      if (cmap.size) byObj.set(num, cmap);
+    });
+    var byName = new Map();
+    objs.forEach(function (o) {
+      var re = /\/(F\w+)\s+(\d+)\s+\d+\s+R/g, m;
+      while ((m = re.exec(o.body))) if (!byName.has(m[1])) byName.set(m[1], parseInt(m[2], 10));
+    });
+    return { byObj: byObj, byName: byName };
+  }
+
+  // ---------- content stream -> text ----------
+  var ESCAPES = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", "(": "(", ")": ")", "\\": "\\" };
+
+  function unescapeLiteral(s) {
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var c = s[i];
+      if (c === "\\" && i + 1 < s.length) {
+        var nx = s[i + 1];
+        if (ESCAPES[nx] !== undefined) { out += ESCAPES[nx]; i++; continue; }
+        if (nx >= "0" && nx <= "7") {
+          var j = i + 1, oct = "";
+          while (j < s.length && oct.length < 3 && s[j] >= "0" && s[j] <= "7") oct += s[j++];
+          out += String.fromCharCode(parseInt(oct, 8) & 0xff);
+          i = j - 1; continue;
+        }
+        if (nx === "\n" || nx === "\r") { i++; continue; }
+      }
+      out += c;
+    }
+    return out;
+  }
+
+  function decodeString(raw, cmap, isHex) {
+    if (isHex) {
+      var h = raw.slice(1, -1).replace(/\s/g, "");
+      if (h.length % 2) h += "0";
+      if (cmap && cmap.size) {
+        var wide = false;
+        cmap.forEach(function (_, k) { if (k > 0xff) wide = true; });
+        var out = "";
+        if (wide) {
+          for (var i = 0; i + 3 < h.length; i += 4) out += cmap.get(parseInt(h.substr(i, 4), 16)) || "";
+        } else {
+          for (var j = 0; j + 1 < h.length; j += 2) out += cmap.get(parseInt(h.substr(j, 2), 16)) || "";
+        }
+        return out;
+      }
+      var s = "";
+      for (var k = 0; k + 1 < h.length; k += 2) s += String.fromCharCode(parseInt(h.substr(k, 2), 16));
+      return s;
+    }
+    var text = unescapeLiteral(raw.slice(1, -1));
+    if (cmap && cmap.size) {
+      var r = "";
+      for (var n = 0; n < text.length; n++) {
+        var code = text.charCodeAt(n);
+        r += cmap.has(code) ? cmap.get(code) : text[n];
+      }
+      return r;
+    }
+    return text;
+  }
+
+  var TOKEN = new RegExp(
+    "(\\((?:\\\\.|[^\\\\()]|\\((?:\\\\.|[^\\\\()])*\\))*\\))" + // literal string
+    "|(<[0-9A-Fa-f\\s]*>)" +                                     // hex string
+    "|(-?[\\d.]+)" +                                             // number
+    "|(/[^\\s/\\[\\]<>(]+)" +                                    // name
+    "|(TJ|Tj|'|\"|Td|TD|Tm|T\\*|BT|ET|Tf)",                      // operator
+    "g"
+  );
+
+  function streamToLines(content, maps) {
+    var lines = [], cur = [], nums = [], cmap = null, lastY = null, pendingFont = "", m;
+    TOKEN.lastIndex = 0;
+    while ((m = TOKEN.exec(content))) {
+      if (m[3] !== undefined) { nums.push(parseFloat(m[3])); continue; }
+      if (m[4] !== undefined) { nums = []; pendingFont = m[4].slice(1); continue; }
+      if (m[1] !== undefined || m[2] !== undefined) {
+        cur.push(decodeString(m[1] !== undefined ? m[1] : m[2], cmap, m[2] !== undefined));
+        nums = []; continue;
+      }
+      var op = m[5];
+      if (op === "Tf") {
+        var objNum = maps.byName.get(pendingFont);
+        cmap = (objNum !== undefined && maps.byObj.get(objNum)) || null;
+        nums = [];
+      } else if (op === "Td" || op === "TD" || op === "Tm" || op === "T*" || op === "BT" || op === "ET") {
+        var y = null, moved;
+        if ((op === "Td" || op === "TD") && nums.length >= 2) {
+          y = nums[nums.length - 1];
+          moved = Math.abs(y) > 0.01;
+        } else if (op === "Tm" && nums.length >= 6) {
+          y = nums[nums.length - 1];
+          moved = lastY === null || Math.abs(y - lastY) > 0.5;
+        } else {
+          moved = true;
+        }
+        if (moved && cur.length) { lines.push(cur.join("")); cur = []; }
+        if (op === "Tm") lastY = y;
+        else if ((op === "Td" || op === "TD") && y !== null && lastY !== null) lastY += y;
+        nums = [];
+      } else {
+        nums = [];
+      }
+    }
+    if (cur.length) lines.push(cur.join(""));
+    return lines;
+  }
+
+  async function extractText(bytes, inflate) {
+    var raw = toLatin1(bytes);
+    var objs = await parseObjects(raw, inflate);
+    var maps = fontMaps(objs);
+    var pages = [];
+    objs.forEach(function (o) {
+      if (o.stream && /BT/.test(o.stream) && /(Tj|TJ)/.test(o.stream)) {
+        pages.push(streamToLines(o.stream, maps).join("\n"));
+      }
+    });
+    return pages.join("\n");
+  }
+
+  // ---------- statement analysis ----------
+  var DATE = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}\b/;
+  var AMOUNT = /^(-?)\$([\d,]+\.\d{2})$/;
+  var POINTS_HEADERS = ["MARRIOTT BONVOY POINTS", "MEMBERSHIP REWARDS POINTS"];
+  var NOISE = ["2X Points", "3X Points", "4X Points", "5X Points", "6X Points",
+               "Credit", "Amex Offer Credit", "DATE DESCRIPTION AMOUNT"];
+
+  function splitBlocks(text) {
+    var blocks = [], cur = null;
+    text.split(/\r?\n/).forEach(function (line) {
+      line = line.replace(/\s+$/, "");
+      if (DATE.test(line)) {
+        if (cur) blocks.push(cur);
+        cur = [line];
+      } else if (cur) {
+        cur.push(line);
+      }
+    });
+    if (cur) blocks.push(cur);
+    return blocks;
+  }
+
+  function parsePoints(block) {
+    var idx = -1;
+    for (var h = 0; h < POINTS_HEADERS.length && idx < 0; h++) idx = block.indexOf(POINTS_HEADERS[h]);
+    if (idx < 0) return 0;
+    var tail = block.slice(idx + 1).join(" ").split("ADDITIONAL INFORMATION")[0];
+    var m = /purchases\s+(-?[\d,]+)/.exec(tail);
+    if (m) return parseInt(m[1].replace(/,/g, ""), 10);
+    m = /credit\s*(-?[\d,]+)/.exec(tail);
+    // "Points debited due to a return or merchant credit" is always negative;
+    // the sign lives in the wording, not the number.
+    if (m) return -Math.abs(parseInt(m[1].replace(/,/g, ""), 10));
+    return 0;
+  }
+
+  function parseBlock(block) {
+    var amount = null;
+    for (var i = 1; i < block.length; i++) {
+      var m = AMOUNT.exec(block[i]);
+      if (m) { amount = parseFloat(m[2].replace(/,/g, "")) * (m[1] === "-" ? -1 : 1); break; }
+    }
+    if (amount === null) return null;
+    var desc = "";
+    for (var j = 1; j < block.length; j++) {
+      if (NOISE.indexOf(block[j]) < 0 && !AMOUNT.test(block[j])) { desc = block[j]; break; }
+    }
+    var points = parsePoints(block);
+    return {
+      date: block[0].slice(0, 6).trim(),
+      description: desc.slice(0, 60).trim(),
+      amount: amount,
+      points: points,
+      eligible: points !== 0,
+      pending: /\b(Pending|Processing)\b/i.test(block.join(" "))
+    };
+  }
+
+  function round2(n) { return Math.round(n * 100) / 100; }
+
+  function analyze(text) {
+    var txns = [];
+    splitBlocks(text).forEach(function (b) {
+      var t = parseBlock(b);
+      if (t) txns.push(t);
+    });
+    var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
+    var eligible = txns.filter(function (t) { return t.eligible; });
+    var sum = function (arr) { return arr.reduce(function (a, t) { return a + t.amount; }, 0); };
+    return {
+      transactions: txns,
+      summary: {
+        transactions: txns.length,
+        amountLines: amountLines,
+        complete: amountLines === txns.length,
+        eligibleCount: eligible.length,
+        eligibleCharges: round2(sum(eligible.filter(function (t) { return t.amount > 0; }))),
+        eligibleRefunds: round2(sum(eligible.filter(function (t) { return t.amount < 0; }))),
+        netEligibleSpend: round2(sum(eligible)),
+        netPoints: eligible.reduce(function (a, t) { return a + t.points; }, 0)
+      }
+    };
+  }
+
+  async function analyzePdf(bytes, inflate) {
+    return analyze(await extractText(bytes, inflate));
+  }
+
+  root.AmexSpend = {
+    extractText: extractText,
+    analyze: analyze,
+    analyzePdf: analyzePdf
+  };
+})(typeof globalThis !== "undefined" ? globalThis : this);
+
+if (typeof module !== "undefined" && module.exports) module.exports = globalThis.AmexSpend;
+
+</script>
+<script>
+(function () {
+  "use strict";
+  var drop = document.getElementById("drop"),
+      file = document.getElementById("file"),
+      out  = document.getElementById("out"),
+      results = [];
+
+  async function inflate(bytes) {
+    for (var fmt of ["deflate", "deflate-raw"]) {
+      try {
+        var ds = new DecompressionStream(fmt);
+        var buf = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+        var u8 = new Uint8Array(buf), s = "", CH = 0x8000;
+        for (var i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+        return s;
+      } catch (e) { /* try next format */ }
+    }
+    return "";
+  }
+
+  var money = function (n) {
+    return (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  var esc = function (s) { return String(s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); };
+
+  function render() {
+    var html = "";
+    results.forEach(function (r, idx) {
+      var s = r.summary;
+      html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1>" +
+        '<button class="ghost" data-csv="' + idx + '">Download CSV</button></div>' +
+        (s.complete ? "" : '<div class="warn">⚠ parsed ' + s.transactions + " of " + s.amountLines +
+          " amount lines — result may be incomplete</div>") +
+        '<div class="grid">' +
+        '<div class="kpi big"><span>Net eligible spend</span><strong>' + money(s.netEligibleSpend) + "</strong></div>" +
+        '<div class="kpi"><span>Eligible charges</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
+        '<div class="kpi"><span>Point-debited refunds</span><strong>' + money(s.eligibleRefunds) + "</strong></div>" +
+        '<div class="kpi"><span>Eligible / total</span><strong>' + s.eligibleCount + " / " + s.transactions + "</strong></div>" +
+        '<div class="kpi"><span>Net points</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>" +
+        "</div>";
+
+      var excluded = r.transactions.filter(function (t) { return !t.eligible; });
+      html += "<details open><summary>Excluded — no points (" + excluded.length + ")</summary><table>" +
+        "<tr><th>Date</th><th>Description</th><th class='num'>Amount</th></tr>";
+      excluded.forEach(function (t) {
+        html += "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.description) +
+          (t.pending ? ' <span class="tag">pending</span>' : "") +
+          "</td><td class='num'>" + money(t.amount) + "</td></tr>";
+      });
+      html += "</table></details>";
+
+      html += "<details><summary>All transactions (" + r.transactions.length + ")</summary><table>" +
+        "<tr><th>Date</th><th>Description</th><th class='num'>Amount</th><th class='num'>Points</th><th>Eligible</th></tr>";
+      r.transactions.forEach(function (t) {
+        html += "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.description) + "</td><td class='num'>" +
+          money(t.amount) + "</td><td class='num'>" + t.points.toLocaleString("en-US") + "</td><td class='" +
+          (t.eligible ? "yes'>YES" : "no'>NO") + "</td></tr>";
+      });
+      html += "</table></details></div>";
+    });
+
+    if (results.length > 1) {
+      var total = results.reduce(function (a, r) { return a + r.summary.netEligibleSpend; }, 0);
+      html += '<div class="card"><div class="kpi big"><span>Combined net eligible spend</span><strong>' +
+        money(Math.round(total * 100) / 100) + "</strong></div></div>";
+    }
+    out.innerHTML = html;
+
+    out.querySelectorAll("[data-csv]").forEach(function (btn) {
+      btn.onclick = function () { downloadCsv(results[+btn.dataset.csv]); };
+    });
+  }
+
+  function downloadCsv(r) {
+    var rows = [["date", "description", "amount", "points", "eligible", "pending"]];
+    r.transactions.forEach(function (t) {
+      rows.push([t.date, t.description, t.amount.toFixed(2), t.points, t.eligible ? "YES" : "NO", t.pending ? "YES" : ""]);
+    });
+    var csv = "\uFEFF" + rows.map(function (row) {
+      return row.map(function (c) { return /[",]/.test(c) ? '"' + String(c).replace(/"/g, '""') + '"' : c; }).join(",");
+    }).join("\r\n");
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = r.name.replace(/\.pdf$/i, "") + "-eligible.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function handle(files) {
+    out.innerHTML = '<div class="card">Parsing…</div>';
+    results = [];
+    for (var f of files) {
+      try {
+        var bytes = new Uint8Array(await f.arrayBuffer());
+        var r = await AmexSpend.analyzePdf(bytes, inflate);
+        r.name = f.name;
+        results.push(r);
+      } catch (e) {
+        out.innerHTML = '<div class="card warn">Failed to parse ' + esc(f.name) + ": " + esc(e.message) + "</div>";
+        return;
+      }
+    }
+    render();
+  }
+
+  drop.onclick = function () { file.click(); };
+  file.onchange = function () { if (file.files.length) handle(file.files); };
+  ["dragenter", "dragover"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add("hot"); });
+  });
+  ["dragleave", "drop"].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove("hot"); });
+  });
+  drop.addEventListener("drop", function (e) {
+    if (e.dataTransfer.files.length) handle(e.dataTransfer.files);
+  });
+})();
+</script>
+</body>
+</html>
