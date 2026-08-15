@@ -2,7 +2,7 @@
 
 A single-file, offline calculator for American Express **eligible spend**.
 
-**[Open the tool](https://REPLACE-ME.github.io/amex-eligible-spend/)** — or download
+**[Open the tool](https://amex2026.github.io/amex-eligible-spend/)** — or download
 `index.html` and double-click it. Nothing to install.
 
 ## What it does
@@ -23,9 +23,19 @@ a combined total.
 ## Privacy
 
 Everything runs in your browser. The PDF is never uploaded — there is no server, no
-network request, and no analytics. The page works with the network disconnected, and
-you can verify that: the file contains no `<script src>`, no `fetch`, and no external
-links of any kind.
+network request, and no analytics.
+
+Don't take my word for it — verify it yourself in 30 seconds:
+
+1. **Go offline.** Turn off WiFi, open the file, drop in a PDF. It still works. Data
+   that never leaves the machine can't be exfiltrated.
+2. **Watch the network.** `F12` → Network tab → drop in a PDF → zero requests.
+3. **Read it.** `Ctrl+U`, or open it in any text editor. Search for `fetch`,
+   `XMLHttpRequest`, `script src`, or `http` — there are none. It's 20 KB total.
+
+Trust in a tool like this comes down to three things: it runs offline (your data
+stays put), the source is readable (auditable), and what runs is what you read (it's
+a local file). This one is all three.
 
 ## How it works
 
