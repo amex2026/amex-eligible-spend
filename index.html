@@ -303,10 +303,13 @@
   var DATE = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}\b/;
   var AMOUNT = /^(-?)\$([\d,]+\.\d{2})$/;
   // Rewards-program header preceding the points line. Card-agnostic: every
-  // Amex program ends in POINTS (Membership Rewards / Marriott Bonvoy /
-  // Hilton Honors / ...) except Delta, which uses MILES.
+  // Amex program header *ends* with POINTS (Membership Rewards / Marriott
+  // Bonvoy / Hilton Honors / ...) except Delta, which ends with MILES®.
+  // Anchoring at the end plus a word boundary is what keeps merchant names
+  // that merely contain the word from matching, e.g. "AVIANCA LIFEMILES".
+  // SKYMILES is spelled out because Delta's header has no boundary before it.
   var POINTS_HEADER = /^[A-Z0-9 ,&'’*®.\-]+$/;
-  var POINTS_WORD = /(POINTS|MILES)/;
+  var POINTS_WORD = /(\bPOINTS|\bMILES|SKYMILES)[®*.,\s]*(-?[\d,]+)?$/;
   // Sections that end the points detail of a transaction.
   var POINTS_STOP = /^(ADDITIONAL INFORMATION|THANK YOU FOR YOUR STAY|CHECK-IN|CHECK-OUT|METHOD|CARD|PASSENGER|TICKET NUMBER|DATE DESCRIPTION AMOUNT)$/i;
   // Sub-labels under the date column and table chrome, never a description.
