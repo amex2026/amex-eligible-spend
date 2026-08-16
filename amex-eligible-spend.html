@@ -50,9 +50,9 @@
   <b>全部在本地计算</b> —— 不上传、无服务器、断网也能用。</div>
 
 <div class="howto">
-  <b>⚠️ PDF 要用「Print」导出，不是「Download」</b>
+  <b>⚠️ PDF 要用<u>电脑网页版</u>的「Print」导出，不是「Download」，也不要用手机 App</b>
   <ol>
-    <li>登录 Amex <b>网页版或手机 App</b> → <b>Statements &amp; Activity</b></li>
+    <li>用<b>电脑浏览器</b>登录 Amex → <b>Statements &amp; Activity</b>（手机 App 打印出来的活动页缺 1X 积分明细，本工具会拒绝）</li>
     <li><b>先把日期筛选（Filter）调到覆盖你要统计的全部账期</b> —— 只看一期就只会算那一期</li>
     <li>点 <b>Print</b>（<u>不要点 Download</u>）</li>
     <li>务必勾选 <b>Additional Details</b> —— 积分信息在这里面，不勾就算不出来</li>
@@ -391,14 +391,11 @@
   function round2(n) { return Math.round(n * 100) / 100; }
 
   // ---------------------------------------------------------------------
-  // Format B: the printed *Account Activity* page (web app / mobile).
-  // It has no rewards detail at all, just label/value pairs:
-  //   Date / Aug 12 / Status / 2X Points / Description / FOO / Amount / $33.13
-  // "Status" is optional; when present it is a points multiplier, "Credit"
-  // or "Pending".
+  // Format B: the printed *Account Activity* page.
+  // Detected only so it can be refused: that page shows a `2X Points`
+  // multiplier tag but no points values, and it omits 1X earnings entirely,
+  // so eligible spend cannot be computed correctly from it.
   // ---------------------------------------------------------------------
-  var MULT = /^(\d+)X(\s+(Points|Miles))?$/i;
-
   function isActivityFormat(text) {
     var lines = text.split(/\r?\n/);
     var d = 0, a = 0;
@@ -410,72 +407,27 @@
     return d >= 5 && a >= 5;
   }
 
-  // Statement credits and payments are never merchant refunds.
-  var NOT_REFUND = /(\bcredit\b|payment|thank you|membership fee|autopay)/i;
-
-  function normDesc(s) {
-    return s.replace(/^AplPay\s+/i, "").replace(/\s+/g, " ").trim().toUpperCase();
-  }
-
-  function analyzeActivity(text) {
-    var lines = text.split(/\r?\n/).map(function (l) { return l.trim(); });
-    var raw = [], amountLines = 0;
-    for (var i = 0; i < lines.length; i++) {
-      if (lines[i] !== "Date" || !DATE.test(lines[i + 1] || "")) continue;
-      var rec = { date: lines[i + 1], status: "", description: "", amount: null };
-      for (var j = i + 2; j < lines.length && j < i + 12; j++) {
-        var l = lines[j];
-        if (l === "Date") break;
-        if (l === "Status") { rec.status = lines[j + 1] || ""; j++; }
-        else if (l === "Description") { rec.description = lines[j + 1] || ""; j++; }
-        else if (l === "Amount") {
-          amountLines++;
-          var m = AMOUNT.exec(lines[j + 1] || "");
-          if (m) rec.amount = parseFloat(m[2].replace(/,/g, "")) * (m[1] === "-" ? -1 : 1);
-          i = j + 1;
-          break;
-        }
-      }
-      if (rec.amount !== null) raw.push(rec);
-    }
-
-    // Index descriptions so a "Credit" row can be matched to its charge.
-    var earning = {}, plain = {};
-    raw.forEach(function (r) {
-      var k = normDesc(r.description);
-      if (MULT.test(r.status)) earning[k] = true;
-      else if (!r.status) plain[k] = true;
-    });
-
-    var txns = raw.map(function (r) {
-      var mult = MULT.exec(r.status);
-      var pending = /^(Pending|Processing)$/i.test(r.status);
-      var eligible = false;
-      if (mult) eligible = true;
-      else if (!pending && /^credit$/i.test(r.status)) {
-        var k = normDesc(r.description);
-        // A refund earns negative points when the original purchase earned
-        // points. Statement credits / payments never do.
-        if (NOT_REFUND.test(r.description)) eligible = false;
-        else if (earning[k]) eligible = true;
-        else if (plain[k]) eligible = false;
-        else eligible = true;
-      }
-      return {
-        date: r.date.slice(0, 6).trim(),
-        description: r.description.slice(0, 60).trim(),
-        amount: r.amount,
-        points: 0,
-        pointsLabel: mult ? mult[1] + "X" : "",
-        eligible: eligible,
-        pending: pending
-      };
-    });
-    return finish(txns, amountLines, "activity");
-  }
-
   function analyze(text) {
-    if (isActivityFormat(text)) return analyzeActivity(text);
+    if (isActivityFormat(text)) {
+      return {
+        transactions: [],
+        summary: {
+          format: "activity",
+          unsupported: true,
+          message: "这是手机版 Print 出来的 Account Activity 活动页，缺少 1X 等积分明细，" +
+            "无法算全 eligible spend。请用电脑网页版：Statements & Activity → 选一期已出账单 → " +
+            "Print（不要 Download）→ 勾 Additional Details。",
+          transactions: 0,
+          amountLines: 0,
+          complete: false,
+          eligibleCount: 0,
+          eligibleCharges: 0,
+          eligibleRefunds: 0,
+          netEligibleSpend: 0,
+          netPoints: 0
+        }
+      };
+    }
     var txns = [];
     splitBlocks(text).forEach(function (b) {
       var t = parseBlock(b);
@@ -548,6 +500,11 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
     var html = "";
     results.forEach(function (r, idx) {
       var s = r.summary;
+      if (s.unsupported) {
+        html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1></div>" +
+          '<div class="warn">⚠ ' + esc(s.message) + "</div></div>";
+        return;
+      }
       html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1>" +
         '<button class="ghost" data-csv="' + idx + '">导出 CSV</button></div>' +
         (s.complete ? "" : '<div class="warn">⚠ 只解析出 ' + s.transactions + " of " + s.amountLines +
@@ -560,12 +517,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
         (s.format === "activity"
           ? '<div class="kpi"><span>积分</span><strong style="font-size:14px">仅倍率</strong></div>'
           : '<div class="kpi"><span>净积分</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>") +
-        "</div>" +
-        (s.format === "activity"
-          ? '<div class="warn">这是 <b>Account Activity 活动页</b>（网页/手机版）打印件，只有 <code>2X Points</code> 这样的倍率标签、没有积分数值。' +
-            '带倍率的算 eligible；<code>Credit</code> 若能对上一笔有积分的消费（或看不到对应消费）按退款计入，Amex 自家的 statement credit / 还款则剔除。' +
-            '想要精确积分，请改用 <b>Statements &amp; Activity → 某期账单 → Print → 勾 Additional Details</b>。</div>'
-          : "");
+        "</div>";
 
       var excluded = r.transactions.filter(function (t) { return !t.eligible; });
       html += "<details open><summary>已剔除 · 无积分 (" + excluded.length + ")</summary><table>" +
@@ -587,8 +539,9 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
       html += "</table></details></div>";
     });
 
-    if (results.length > 1) {
-      var total = results.reduce(function (a, r) { return a + r.summary.netEligibleSpend; }, 0);
+    var ok = results.filter(function (r) { return !r.summary.unsupported; });
+    if (ok.length > 1) {
+      var total = ok.reduce(function (a, r) { return a + r.summary.netEligibleSpend; }, 0);
       html += '<div class="card"><div class="kpi big"><span>合计净 ELIGIBLE SPEND</span><strong>' +
         money(Math.round(total * 100) / 100) + "</strong></div></div>";
     }
