@@ -304,7 +304,7 @@
   var AMOUNT = /^(-?)\$([\d,]+\.\d{2})$/;
   // Rewards-program header preceding the points line. Covers Membership Rewards,
   // Marriott Bonvoy, Delta SkyMiles, Hilton Honors, etc.
-  var POINTS_HEADER = /^[A-Z0-9 &'’*®.\-]+$/;
+  var POINTS_HEADER = /^[A-Z0-9 ,&'’*®.\-]+$/;
   var POINTS_WORD = /(POINTS|MILES|REWARDS|BONVOY|HONORS)/;
   // Sections that end the points detail of a transaction.
   var POINTS_STOP = /^(ADDITIONAL INFORMATION|THANK YOU FOR YOUR STAY|CHECK-IN|CHECK-OUT|METHOD|CARD|PASSENGER|TICKET NUMBER|DATE DESCRIPTION AMOUNT)$/i;
@@ -327,18 +327,23 @@
   }
 
   function parsePoints(block) {
-    var idx = -1;
+    var idx = -1, headLine = "";
     for (var i = 1; i < block.length; i++) {
       var line = block[i].trim();
       // Require at least two words: a bare "REWARDS" line is the
       // "points not available yet" notice, not a program header.
-      if (line && /\S\s+\S/.test(line) && POINTS_HEADER.test(line) && POINTS_WORD.test(line)) { idx = i; break; }
+      if (line && /\S\s+\S/.test(line) && POINTS_HEADER.test(line) && POINTS_WORD.test(line)) {
+        idx = i; headLine = line; break;
+      }
     }
     if (idx < 0) return 0;
-    // Points detail runs from the program header until the next unrelated
+    var words = [], value = null;
+    // Some layouts put the value straight on the header: "HILTON HONORS POINTS 21".
+    var head = /(?:POINTS|MILES|REWARDS)\s+(-?[\d,]+)$/i.exec(headLine);
+    if (head) value = head[1];
+    // Otherwise the detail runs from the header until the next unrelated
     // section. Take the FIRST value found and never scan far, so unrelated
     // digits (ticket numbers, flight dates, ZIPs) can't leak in.
-    var words = [], value = null;
     for (var j = idx + 1; j < block.length && j <= idx + 8 && value === null; j++) {
       var l = block[j].trim();
       if (POINTS_STOP.test(l)) break;
