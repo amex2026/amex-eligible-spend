@@ -302,9 +302,12 @@
   // ---------- statement analysis ----------
   var DATE = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}\b/;
   var AMOUNT = /^(-?)\$([\d,]+\.\d{2})$/;
-  var POINTS_HEADERS = ["MARRIOTT BONVOY POINTS", "MEMBERSHIP REWARDS POINTS"];
-  var NOISE = ["2X Points", "3X Points", "4X Points", "5X Points", "6X Points",
-               "Credit", "Amex Offer Credit", "DATE DESCRIPTION AMOUNT"];
+  // Rewards-program header preceding the points line. Covers Membership Rewards,
+  // Marriott Bonvoy, Delta SkyMiles, Hilton Honors, etc.
+  var POINTS_HEADER = /^[A-Z0-9 &'’*®.\-]+$/;
+  var POINTS_WORD = /(POINTS|MILES|REWARDS|BONVOY|HONORS)/;
+  // Sub-labels under the date column and table chrome, never a description.
+  var NOISE = /^(\d+X( (Points|Miles))?|Credit|Amex Offer Credit|Pending|Processing|DATE DESCRIPTION AMOUNT)$/i;
 
   function splitBlocks(text) {
     var blocks = [], cur = null;
@@ -323,7 +326,10 @@
 
   function parsePoints(block) {
     var idx = -1;
-    for (var h = 0; h < POINTS_HEADERS.length && idx < 0; h++) idx = block.indexOf(POINTS_HEADERS[h]);
+    for (var i = 1; i < block.length; i++) {
+      var line = block[i].trim();
+      if (line && POINTS_HEADER.test(line) && POINTS_WORD.test(line)) { idx = i; break; }
+    }
     if (idx < 0) return 0;
     var tail = block.slice(idx + 1).join(" ").split("ADDITIONAL INFORMATION")[0];
     var m = /purchases\s+(-?[\d,]+)/.exec(tail);
@@ -344,7 +350,7 @@
     if (amount === null) return null;
     var desc = "";
     for (var j = 1; j < block.length; j++) {
-      if (NOISE.indexOf(block[j]) < 0 && !AMOUNT.test(block[j])) { desc = block[j]; break; }
+      if (!NOISE.test(block[j]) && !AMOUNT.test(block[j])) { desc = block[j]; break; }
     }
     var points = parsePoints(block);
     return {
