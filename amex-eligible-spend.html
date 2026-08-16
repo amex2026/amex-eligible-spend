@@ -382,6 +382,7 @@
       description: desc.slice(0, 60).trim(),
       amount: amount,
       points: points,
+      pointsLabel: "",
       eligible: points !== 0,
       pending: /\b(Pending|Processing)\b/i.test(block.join(" "))
     };
@@ -389,18 +390,108 @@
 
   function round2(n) { return Math.round(n * 100) / 100; }
 
+  // ---------------------------------------------------------------------
+  // Format B: the printed *Account Activity* page (web app / mobile).
+  // It has no rewards detail at all, just label/value pairs:
+  //   Date / Aug 12 / Status / 2X Points / Description / FOO / Amount / $33.13
+  // "Status" is optional; when present it is a points multiplier, "Credit"
+  // or "Pending".
+  // ---------------------------------------------------------------------
+  var MULT = /^(\d+)X(\s+(Points|Miles))?$/i;
+
+  function isActivityFormat(text) {
+    var lines = text.split(/\r?\n/);
+    var d = 0, a = 0;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i].trim();
+      if (l === "Date") d++;
+      else if (l === "Amount") a++;
+    }
+    return d >= 5 && a >= 5;
+  }
+
+  // Statement credits and payments are never merchant refunds.
+  var NOT_REFUND = /(\bcredit\b|payment|thank you|membership fee|autopay)/i;
+
+  function normDesc(s) {
+    return s.replace(/^AplPay\s+/i, "").replace(/\s+/g, " ").trim().toUpperCase();
+  }
+
+  function analyzeActivity(text) {
+    var lines = text.split(/\r?\n/).map(function (l) { return l.trim(); });
+    var raw = [], amountLines = 0;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i] !== "Date" || !DATE.test(lines[i + 1] || "")) continue;
+      var rec = { date: lines[i + 1], status: "", description: "", amount: null };
+      for (var j = i + 2; j < lines.length && j < i + 12; j++) {
+        var l = lines[j];
+        if (l === "Date") break;
+        if (l === "Status") { rec.status = lines[j + 1] || ""; j++; }
+        else if (l === "Description") { rec.description = lines[j + 1] || ""; j++; }
+        else if (l === "Amount") {
+          amountLines++;
+          var m = AMOUNT.exec(lines[j + 1] || "");
+          if (m) rec.amount = parseFloat(m[2].replace(/,/g, "")) * (m[1] === "-" ? -1 : 1);
+          i = j + 1;
+          break;
+        }
+      }
+      if (rec.amount !== null) raw.push(rec);
+    }
+
+    // Index descriptions so a "Credit" row can be matched to its charge.
+    var earning = {}, plain = {};
+    raw.forEach(function (r) {
+      var k = normDesc(r.description);
+      if (MULT.test(r.status)) earning[k] = true;
+      else if (!r.status) plain[k] = true;
+    });
+
+    var txns = raw.map(function (r) {
+      var mult = MULT.exec(r.status);
+      var pending = /^(Pending|Processing)$/i.test(r.status);
+      var eligible = false;
+      if (mult) eligible = true;
+      else if (!pending && /^credit$/i.test(r.status)) {
+        var k = normDesc(r.description);
+        // A refund earns negative points when the original purchase earned
+        // points. Statement credits / payments never do.
+        if (NOT_REFUND.test(r.description)) eligible = false;
+        else if (earning[k]) eligible = true;
+        else if (plain[k]) eligible = false;
+        else eligible = true;
+      }
+      return {
+        date: r.date.slice(0, 6).trim(),
+        description: r.description.slice(0, 60).trim(),
+        amount: r.amount,
+        points: 0,
+        pointsLabel: mult ? mult[1] + "X" : "",
+        eligible: eligible,
+        pending: pending
+      };
+    });
+    return finish(txns, amountLines, "activity");
+  }
+
   function analyze(text) {
+    if (isActivityFormat(text)) return analyzeActivity(text);
     var txns = [];
     splitBlocks(text).forEach(function (b) {
       var t = parseBlock(b);
       if (t) txns.push(t);
     });
     var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
+    return finish(txns, amountLines, "statement");
+  }
+
+  function finish(txns, amountLines, format) {
     var eligible = txns.filter(function (t) { return t.eligible; });
     var sum = function (arr) { return arr.reduce(function (a, t) { return a + t.amount; }, 0); };
     return {
       transactions: txns,
       summary: {
+        format: format,
         transactions: txns.length,
         amountLines: amountLines,
         complete: amountLines === txns.length,
@@ -466,8 +557,15 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
         '<div class="kpi"><span>Eligible 消费</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
         '<div class="kpi"><span>Eligible 退款</span><strong>' + money(s.eligibleRefunds) + "</strong></div>" +
         '<div class="kpi"><span>Eligible / 总笔数</span><strong>' + s.eligibleCount + " / " + s.transactions + "</strong></div>" +
-        '<div class="kpi"><span>净积分</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>" +
-        "</div>";
+        (s.format === "activity"
+          ? '<div class="kpi"><span>积分</span><strong style="font-size:14px">仅倍率</strong></div>'
+          : '<div class="kpi"><span>净积分</span><strong>' + s.netPoints.toLocaleString("en-US") + "</strong></div>") +
+        "</div>" +
+        (s.format === "activity"
+          ? '<div class="warn">这是 <b>Account Activity 活动页</b>（网页/手机版）打印件，只有 <code>2X Points</code> 这样的倍率标签、没有积分数值。' +
+            '带倍率的算 eligible；<code>Credit</code> 若能对上一笔有积分的消费（或看不到对应消费）按退款计入，Amex 自家的 statement credit / 还款则剔除。' +
+            '想要精确积分，请改用 <b>Statements &amp; Activity → 某期账单 → Print → 勾 Additional Details</b>。</div>'
+          : "");
 
       var excluded = r.transactions.filter(function (t) { return !t.eligible; });
       html += "<details open><summary>已剔除 · 无积分 (" + excluded.length + ")</summary><table>" +
@@ -483,7 +581,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
         "<tr><th>日期</th><th>描述</th><th class='num'>金额</th><th class='num'>积分</th><th>Eligible</th></tr>";
       r.transactions.forEach(function (t) {
         html += "<tr><td>" + esc(t.date) + "</td><td>" + esc(t.description) + "</td><td class='num'>" +
-          money(t.amount) + "</td><td class='num'>" + t.points.toLocaleString("en-US") + "</td><td class='" +
+          money(t.amount) + "</td><td class='num'>" + (t.pointsLabel || t.points.toLocaleString("en-US")) + "</td><td class='" +
           (t.eligible ? "yes'>YES" : "no'>NO") + "</td></tr>";
       });
       html += "</table></details></div>";
@@ -504,7 +602,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
   function downloadCsv(r) {
     var rows = [["date", "description", "amount", "points", "eligible", "pending"]];
     r.transactions.forEach(function (t) {
-      rows.push([t.date, t.description, t.amount.toFixed(2), t.points, t.eligible ? "YES" : "NO", t.pending ? "YES" : ""]);
+      rows.push([t.date, t.description, t.amount.toFixed(2), t.pointsLabel || t.points, t.eligible ? "YES" : "NO", t.pending ? "YES" : ""]);
     });
     var csv = "\uFEFF" + rows.map(function (row) {
       return row.map(function (c) { return /[",]/.test(c) ? '"' + String(c).replace(/"/g, '""') + '"' : c; }).join(",");
