@@ -419,12 +419,18 @@
       if (!NOISE.test(block[j]) && !AMOUNT.test(block[j])) { desc = block[j]; break; }
     }
     var pts = parsePoints(block);
+    var multiplier = null;
+    for (var k = 1; k < block.length && k <= 4; k++) {
+      var mult = /^(\d+)X(?:\s+(?:Points|Miles))?$/i.exec(block[k].trim());
+      if (mult) { multiplier = parseInt(mult[1], 10); break; }
+    }
     return {
       date: block[0].slice(0, 6).trim(),
       description: desc.slice(0, 60).trim(),
       amount: amount,
       points: pts.points,
       needsDeferred: pts.hasHeader && pts.points === 0,
+      multiplier: multiplier,
       pointsLabel: "",
       eligible: pts.points !== 0,
       pending: /\b(Pending|Processing)\b/i.test(block.join(" "))
@@ -479,13 +485,38 @@
     var pending = txns.filter(function (t) { return t.needsDeferred; });
     if (pending.length) {
       var deferred = collectDeferredPoints(text);
-      var n = Math.min(pending.length, deferred.length);
-      for (var i = 0; i < n; i++) {
-        pending[i].points = deferred[i];
-        pending[i].eligible = deferred[i] !== 0;
-      }
+      var used = new Array(deferred.length).fill(false);
+      // PDF object order is not always visual page order, so queue position alone
+      // can shift points onto a neighbouring transaction. Match the value implied
+      // by amount × the printed multiplier first, then use order as a fallback.
+      pending.forEach(function (t) {
+        if (t.multiplier === null) return;
+        var expected = Math.round(Math.abs(t.amount) * t.multiplier);
+        if (t.amount < 0) expected = -expected;
+        for (var i = 0; i < deferred.length; i++) {
+          if (!used[i] && deferred[i] === expected) {
+            t.points = deferred[i];
+            t.eligible = deferred[i] !== 0;
+            used[i] = true;
+            break;
+          }
+        }
+      });
+      var next = 0;
+      pending.forEach(function (t) {
+        if (t.points !== 0) return;
+        while (next < deferred.length && used[next]) next++;
+        if (next < deferred.length) {
+          t.points = deferred[next];
+          t.eligible = deferred[next] !== 0;
+          used[next++] = true;
+        }
+      });
     }
-    txns.forEach(function (t) { delete t.needsDeferred; });
+    txns.forEach(function (t) {
+      delete t.needsDeferred;
+      delete t.multiplier;
+    });
     var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
     return finish(txns, amountLines, "statement");
   }
