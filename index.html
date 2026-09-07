@@ -313,7 +313,7 @@
   // Sections that end the points detail of a transaction.
   var POINTS_STOP = /^(ADDITIONAL INFORMATION|THANK YOU FOR YOUR STAY|CHECK-IN|CHECK-OUT|METHOD|CARD|PASSENGER|TICKET NUMBER|DATE DESCRIPTION AMOUNT)$/i;
   // Sub-labels under the date column and table chrome, never a description.
-  var NOISE = /^(\d+X( (Points|Miles))?|Credit|Amex Offer Credit|Pending|Processing|DATE DESCRIPTION AMOUNT)$/i;
+  var NOISE = /^(\d+X( (Points|Miles))?|Points|Miles|NEW MERCHANT|Credit|Amex Offer Credit|Pending|Processing|DATE DESCRIPTION AMOUNT)$/i;
 
   function splitBlocks(text) {
     var blocks = [], cur = null;
@@ -330,6 +330,42 @@
     return blocks;
   }
 
+  // Two-column prints (e.g. Marriott Bonvoy Brilliant) emit the rewards
+  // *values* in a deferred block at the end of each page instead of next to
+  // the program header. Those blocks look like:
+  //   "2X" / " " / "on Other purchases" / "16"
+  //   "Points debited due to a return or" / "merchant credit" / "-5,013"
+  // They appear in the same order as the transactions that earned them.
+  function collectDeferredPoints(text) {
+    var lines = text.split(/\r?\n/).map(function (l) { return l.trim(); });
+    var out = [];
+    function nextNumber(from) {
+      for (var k = from; k < lines.length && k <= from + 3; k++) {
+        if (/^-?[\d,]+$/.test(lines[k])) return { value: lines[k], at: k };
+        if (lines[k] && !/^on /i.test(lines[k]) && !/^merchant credit$/i.test(lines[k])) return null;
+      }
+      return null;
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (/^\d+X$/.test(l)) {
+        // Skip the date-column tag, which is followed by "Points"/"Miles".
+        var j = i + 1;
+        while (j < lines.length && !lines[j]) j++;
+        if (!/^on /i.test(lines[j] || "")) continue;
+        var n = nextNumber(j + 1);
+        if (n) { out.push(parseInt(n.value.replace(/,/g, ""), 10)); i = n.at; }
+      } else if (/^Points debited due to a return or$/i.test(l)) {
+        var n2 = nextNumber(i + 1);
+        if (n2) {
+          out.push(-Math.abs(parseInt(n2.value.replace(/,/g, ""), 10)));
+          i = n2.at;
+        }
+      }
+    }
+    return out;
+  }
+
   function parsePoints(block) {
     var idx = -1, headLine = "";
     for (var i = 1; i < block.length; i++) {
@@ -340,7 +376,7 @@
         idx = i; headLine = line; break;
       }
     }
-    if (idx < 0) return 0;
+    if (idx < 0) return { points: 0, hasHeader: false };
     var words = [], value = null;
     // Some layouts put the value straight on the header: "HILTON HONORS POINTS 21".
     var head = /(?:POINTS|MILES)\s+(-?[\d,]+)$/i.exec(headLine);
@@ -354,18 +390,21 @@
       if (/^-?[\d,]+$/.test(l)) {
         value = l;
       } else {
-        // Some rows keep the value on the same line: "2X on Other purchases 66"
-        var m = /[a-z)]\s+(-?[\d,]+)$/i.exec(l);
+        // Some rows keep the value on the same line: "2X on Other purchases 66".
+        // Anchor on the multiplier so unrelated text ending in a number
+        // (e.g. "Flight from SEATTLE-TACOMA INT on April 3") can't leak in.
+        var m = /^\d+X\b.*\s(-?[\d,]+)$/i.exec(l);
+        if (!m) m = /(?:debited|merchant credit)\s+(-?[\d,]+)$/i.exec(l);
         if (m) value = m[1];
         else words.push(l);
       }
     }
-    if (value === null) return 0;
+    if (value === null) return { points: 0, hasHeader: true };
     var points = parseInt(value.replace(/,/g, ""), 10);
-    if (!isFinite(points)) return 0;
+    if (!isFinite(points)) return { points: 0, hasHeader: true };
     // Wording carries the sign: "Points debited due to a return or merchant credit".
-    if (/debited|return or merchant/i.test(words.join(" "))) return -Math.abs(points);
-    return points;
+    if (/debited|return or merchant/i.test(words.join(" "))) points = -Math.abs(points);
+    return { points: points, hasHeader: true };
   }
 
   function parseBlock(block) {
@@ -379,14 +418,15 @@
     for (var j = 1; j < block.length; j++) {
       if (!NOISE.test(block[j]) && !AMOUNT.test(block[j])) { desc = block[j]; break; }
     }
-    var points = parsePoints(block);
+    var pts = parsePoints(block);
     return {
       date: block[0].slice(0, 6).trim(),
       description: desc.slice(0, 60).trim(),
       amount: amount,
-      points: points,
+      points: pts.points,
+      needsDeferred: pts.hasHeader && pts.points === 0,
       pointsLabel: "",
-      eligible: points !== 0,
+      eligible: pts.points !== 0,
       pending: /\b(Pending|Processing)\b/i.test(block.join(" "))
     };
   }
@@ -436,6 +476,16 @@
       var t = parseBlock(b);
       if (t) txns.push(t);
     });
+    var pending = txns.filter(function (t) { return t.needsDeferred; });
+    if (pending.length) {
+      var deferred = collectDeferredPoints(text);
+      var n = Math.min(pending.length, deferred.length);
+      for (var i = 0; i < n; i++) {
+        pending[i].points = deferred[i];
+        pending[i].eligible = deferred[i] !== 0;
+      }
+    }
+    txns.forEach(function (t) { delete t.needsDeferred; });
     var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
     return finish(txns, amountLines, "statement");
   }
