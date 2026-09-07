@@ -342,7 +342,7 @@
     function nextNumber(from) {
       for (var k = from; k < lines.length && k <= from + 3; k++) {
         if (/^-?[\d,]+$/.test(lines[k])) return { value: lines[k], at: k };
-        if (lines[k] && !/^on /i.test(lines[k]) && !/^merchant credit$/i.test(lines[k])) return null;
+        if (lines[k] && !/^on /i.test(lines[k]) && !/^(?:or )?merchant credit$/i.test(lines[k])) return null;
       }
       return null;
     }
@@ -355,7 +355,7 @@
         if (!/^on /i.test(lines[j] || "")) continue;
         var n = nextNumber(j + 1);
         if (n) { out.push(parseInt(n.value.replace(/,/g, ""), 10)); i = n.at; }
-      } else if (/^Points debited due to a return or$/i.test(l)) {
+      } else if (/^Points debited due to a return(?: or)?$/i.test(l)) {
         var n2 = nextNumber(i + 1);
         if (n2) {
           out.push(-Math.abs(parseInt(n2.value.replace(/,/g, ""), 10)));
@@ -418,6 +418,20 @@
     for (var j = 1; j < block.length; j++) {
       if (!NOISE.test(block[j]) && !AMOUNT.test(block[j])) { desc = block[j]; break; }
     }
+    var posted = "";
+    for (var p = 1; p < block.length; p++) {
+      var appears = /^Will appear on your .*? statement as(?:\s+(.*))?$/i.exec(block[p].trim());
+      if (!appears) continue;
+      if (appears[1]) posted = appears[1].trim();
+      for (var q = p + 1; q < block.length && !AMOUNT.test(block[q]); q++) {
+        var continuation = block[q].trim();
+        if (continuation) posted += (posted ? " " : "") + continuation;
+      }
+      break;
+    }
+    if (posted && posted.toUpperCase() !== desc.toUpperCase()) {
+      desc += " | " + posted;
+    }
     var pts = parsePoints(block);
     var multiplier = null;
     for (var k = 1; k < block.length && k <= 4; k++) {
@@ -426,7 +440,7 @@
     }
     return {
       date: block[0].slice(0, 6).trim(),
-      description: desc.slice(0, 60).trim(),
+      description: desc.trim(),
       amount: amount,
       points: pts.points,
       needsDeferred: pts.hasHeader && pts.points === 0,
@@ -499,6 +513,38 @@
             t.eligible = deferred[i] !== 0;
             used[i] = true;
             break;
+          }
+        }
+      });
+      // Amex can round components before summing the displayed multiplier,
+      // producing a one-point difference from amount × multiplier.
+      pending.forEach(function (t) {
+        if (t.points !== 0 || t.multiplier === null) return;
+        var expected = Math.round(Math.abs(t.amount) * t.multiplier);
+        if (t.amount < 0) expected = -expected;
+        for (var i = 0; i < deferred.length; i++) {
+          if (!used[i] && Math.abs(deferred[i] - expected) === 1) {
+            t.points = deferred[i];
+            t.eligible = true;
+            used[i] = true;
+            break;
+          }
+        }
+      });
+      // Refund rows are labelled "Credit" instead of showing their multiplier.
+      // Infer an integer multiplier from the negative amount before falling back
+      // to queue order, otherwise small unrelated refunds can steal the value.
+      pending.forEach(function (t) {
+        if (t.points !== 0 || t.multiplier !== null || t.amount >= 0) return;
+        for (var mult = 1; mult <= 20 && t.points === 0; mult++) {
+          var expected = -Math.round(Math.abs(t.amount) * mult);
+          for (var i = 0; i < deferred.length; i++) {
+            if (!used[i] && deferred[i] < 0 && Math.abs(deferred[i] - expected) <= 1) {
+              t.points = deferred[i];
+              t.eligible = true;
+              used[i] = true;
+              break;
+            }
           }
         }
       });
