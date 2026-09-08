@@ -356,14 +356,14 @@
         var n = nextNumber(j + 1);
         if (n) { out.push(parseInt(n.value.replace(/,/g, ""), 10)); i = n.at; }
       } else if (/^Points debited due to a\b/i.test(l)) {
-        // The fixed wording may wrap after "a", "return", or "or".
-        for (var k = i + 1; k < lines.length && k <= i + 4; k++) {
+        // Treat this as a semantic phrase rather than expecting fixed wrapping.
+        for (var k = i + 1; k < lines.length && k <= i + 8; k++) {
           if (/^-?[\d,]+$/.test(lines[k])) {
             out.push(-Math.abs(parseInt(lines[k].replace(/,/g, ""), 10)));
             i = k;
             break;
           }
-          if (lines[k] && !/(?:return|merchant|credit|or)/i.test(lines[k])) break;
+          if (lines[k] && !/(?:points|debited|due|to|a|return|merchant|credit|or)/i.test(lines[k])) break;
         }
       }
     }
@@ -527,7 +527,7 @@
         var expected = Math.round(Math.abs(t.amount) * t.multiplier);
         if (t.amount < 0) expected = -expected;
         for (var i = 0; i < deferred.length; i++) {
-          if (!used[i] && Math.abs(deferred[i] - expected) === 1) {
+          if (!used[i] && Math.abs(deferred[i] - expected) <= t.multiplier) {
             t.points = deferred[i];
             t.eligible = true;
             used[i] = true;
@@ -556,15 +556,20 @@
         }
       });
     }
+    var unmatchedRewards = txns.filter(function (t) {
+      return t.needsDeferred && t.points === 0;
+    }).length;
     txns.forEach(function (t) {
+      t.rewardsUnmatched = t.needsDeferred && t.points === 0;
       delete t.needsDeferred;
       delete t.multiplier;
     });
     var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
-    return finish(txns, amountLines, "statement");
+    return finish(txns, amountLines, "statement", unmatchedRewards);
   }
 
-  function finish(txns, amountLines, format) {
+  function finish(txns, amountLines, format, unmatchedRewards) {
+    unmatchedRewards = unmatchedRewards || 0;
     var eligible = txns.filter(function (t) { return t.eligible; });
     var sum = function (arr) { return arr.reduce(function (a, t) { return a + t.amount; }, 0); };
     return {
@@ -573,7 +578,8 @@
         format: format,
         transactions: txns.length,
         amountLines: amountLines,
-        complete: amountLines === txns.length,
+        complete: amountLines === txns.length && unmatchedRewards === 0,
+        unmatchedRewards: unmatchedRewards,
         eligibleCount: eligible.length,
         eligibleCharges: round2(sum(eligible.filter(function (t) { return t.amount > 0; }))),
         eligibleRefunds: round2(sum(eligible.filter(function (t) { return t.amount < 0; }))),
@@ -634,8 +640,10 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
       }
       html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1>" +
         '<button class="ghost" data-csv="' + idx + '">导出 CSV</button></div>' +
-        (s.complete ? "" : '<div class="warn">⚠ 只解析出 ' + s.transactions + " of " + s.amountLines +
+        (s.transactions === s.amountLines ? "" : '<div class="warn">⚠ 只解析出 ' + s.transactions + " of " + s.amountLines +
           " 个金额行，结果可能不完整</div>") +
+        (!s.unmatchedRewards ? "" : '<div class="warn">⚠ 有 ' + s.unmatchedRewards +
+          " 笔交易显示积分标题，但积分数值未能可靠匹配。为避免漏算，请勿将本次总额作为最终结果。</div>") +
         '<div class="grid">' +
         '<div class="kpi big"><span>净 ELIGIBLE SPEND</span><strong>' + money(s.netEligibleSpend) + "</strong></div>" +
         '<div class="kpi"><span>Eligible 消费</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
