@@ -612,10 +612,15 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
       results = [];
 
   async function inflate(bytes) {
-    for (var fmt of ["deflate", "deflate-raw"]) {
+    var attempts = [
+      ["deflate", bytes],
+      ["deflate-raw", bytes.subarray(2, Math.max(2, bytes.length - 4))],
+      ["deflate-raw", bytes.subarray(2)]
+    ];
+    for (var attempt of attempts) {
       try {
-        var ds = new DecompressionStream(fmt);
-        var buf = await new Response(new Blob([bytes]).stream().pipeThrough(ds)).arrayBuffer();
+        var ds = new DecompressionStream(attempt[0]);
+        var buf = await new Response(new Blob([attempt[1]]).stream().pipeThrough(ds)).arrayBuffer();
         var u8 = new Uint8Array(buf), s = "", CH = 0x8000;
         for (var i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
         return s;
