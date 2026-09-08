@@ -503,56 +503,23 @@
     var pending = txns.filter(function (t) { return t.needsDeferred; });
     if (pending.length) {
       var deferred = collectDeferredPoints(text);
-      var used = new Array(deferred.length).fill(false);
-      // PDF object order is not always visual page order, so queue position alone
-      // can shift points onto a neighbouring transaction. Match the value implied
-      // by amount × the printed multiplier first, then use order as a fallback.
+      // Deferred values preserve transaction order. Amount/multiplier arithmetic
+      // is only a sanity check; using it as a global lookup lets equal-value rows
+      // steal each other's points.
+      var cursor = 0;
       pending.forEach(function (t) {
-        if (t.multiplier === null) return;
-        var expected = Math.round(Math.abs(t.amount) * t.multiplier);
-        if (t.amount < 0) expected = -expected;
-        for (var i = 0; i < deferred.length; i++) {
-          if (!used[i] && deferred[i] === expected) {
-            t.points = deferred[i];
-            t.eligible = deferred[i] !== 0;
-            used[i] = true;
-            break;
-          }
-        }
-      });
-      // Amex can round components before summing the displayed multiplier,
-      // producing a one-point difference from amount × multiplier.
-      pending.forEach(function (t) {
-        if (t.points !== 0 || t.multiplier === null) return;
-        var expected = Math.round(Math.abs(t.amount) * t.multiplier);
-        if (t.amount < 0) expected = -expected;
-        for (var i = 0; i < deferred.length; i++) {
-          if (!used[i] && Math.abs(deferred[i] - expected) <= t.multiplier) {
-            t.points = deferred[i];
-            t.eligible = true;
-            used[i] = true;
-            break;
-          }
-        }
-      });
-      // Rows without a printed multiplier (especially "Credit" refunds and 1X
-      // purchases) may only claim a value when amount × an integer multiplier
-      // explains it. Never assign leftover values by position: PDF object order
-      // is unstable and that would turn unrelated no-points rows into eligible.
-      pending.forEach(function (t) {
-        if (t.points !== 0 || t.multiplier !== null) return;
-        for (var mult = 1; mult <= 20 && t.points === 0; mult++) {
-          var expected = Math.round(Math.abs(t.amount) * mult);
+        if (cursor >= deferred.length) return;
+        var value = deferred[cursor];
+        var valid = Math.sign(value) === Math.sign(t.amount);
+        if (valid && t.multiplier !== null) {
+          var expected = Math.round(Math.abs(t.amount) * t.multiplier);
           if (t.amount < 0) expected = -expected;
-          for (var i = 0; i < deferred.length; i++) {
-            if (!used[i] && Math.sign(deferred[i]) === Math.sign(t.amount) &&
-                Math.abs(deferred[i] - expected) <= 1) {
-              t.points = deferred[i];
-              t.eligible = true;
-              used[i] = true;
-              break;
-            }
-          }
+          valid = Math.abs(value - expected) <= t.multiplier;
+        }
+        if (valid) {
+          t.points = value;
+          t.eligible = value !== 0;
+          cursor++;
         }
       });
     }
