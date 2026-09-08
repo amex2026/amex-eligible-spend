@@ -355,11 +355,15 @@
         if (!/^on /i.test(lines[j] || "")) continue;
         var n = nextNumber(j + 1);
         if (n) { out.push(parseInt(n.value.replace(/,/g, ""), 10)); i = n.at; }
-      } else if (/^Points debited due to a return(?: or)?$/i.test(l)) {
-        var n2 = nextNumber(i + 1);
-        if (n2) {
-          out.push(-Math.abs(parseInt(n2.value.replace(/,/g, ""), 10)));
-          i = n2.at;
+      } else if (/^Points debited due to a\b/i.test(l)) {
+        // The fixed wording may wrap after "a", "return", or "or".
+        for (var k = i + 1; k < lines.length && k <= i + 4; k++) {
+          if (/^-?[\d,]+$/.test(lines[k])) {
+            out.push(-Math.abs(parseInt(lines[k].replace(/,/g, ""), 10)));
+            i = k;
+            break;
+          }
+          if (lines[k] && !/(?:return|merchant|credit|or)/i.test(lines[k])) break;
         }
       }
     }
