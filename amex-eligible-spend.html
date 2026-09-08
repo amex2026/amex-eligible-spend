@@ -523,8 +523,27 @@
         }
       });
     }
+    // Some browsers can lose one detail stream while retaining both transaction
+    // rows. If an otherwise identical same-day transaction has verified points,
+    // the duplicate ticket/charge carries the same rewards value.
+    txns.forEach(function (t) {
+      if (t.points !== 0 || t.multiplier === null) return;
+      var twin = txns.find(function (other) {
+        return other !== t && other.points !== 0 &&
+          other.date === t.date && other.amount === t.amount &&
+          other.description === t.description &&
+          other.multiplier === t.multiplier;
+      });
+      if (twin) {
+        t.points = twin.points;
+        t.eligible = true;
+      }
+    });
     var unmatchedRewards = txns.filter(function (t) {
       return t.needsDeferred && t.points === 0;
+    }).length;
+    var missingRewards = txns.filter(function (t) {
+      return t.multiplier !== null && t.points === 0;
     }).length;
     txns.forEach(function (t) {
       t.rewardsUnmatched = t.needsDeferred && t.points === 0;
@@ -532,11 +551,12 @@
       delete t.multiplier;
     });
     var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
-    return finish(txns, amountLines, "statement", unmatchedRewards);
+    return finish(txns, amountLines, "statement", unmatchedRewards, missingRewards);
   }
 
-  function finish(txns, amountLines, format, unmatchedRewards) {
+  function finish(txns, amountLines, format, unmatchedRewards, missingRewards) {
     unmatchedRewards = unmatchedRewards || 0;
+    missingRewards = missingRewards || 0;
     var eligible = txns.filter(function (t) { return t.eligible; });
     var sum = function (arr) { return arr.reduce(function (a, t) { return a + t.amount; }, 0); };
     return {
@@ -545,8 +565,9 @@
         format: format,
         transactions: txns.length,
         amountLines: amountLines,
-        complete: amountLines === txns.length && unmatchedRewards === 0,
+        complete: amountLines === txns.length && unmatchedRewards === 0 && missingRewards === 0,
         unmatchedRewards: unmatchedRewards,
+        missingRewards: missingRewards,
         eligibleCount: eligible.length,
         eligibleCharges: round2(sum(eligible.filter(function (t) { return t.amount > 0; }))),
         eligibleRefunds: round2(sum(eligible.filter(function (t) { return t.amount < 0; }))),
@@ -616,6 +637,8 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
           " 个金额行，结果可能不完整</div>") +
         (!s.unmatchedRewards ? "" : '<div class="warn">⚠ 有 ' + s.unmatchedRewards +
           " 笔交易显示积分标题，但积分数值未能可靠匹配。为避免漏算，请勿将本次总额作为最终结果。</div>") +
+        (!s.missingRewards ? "" : '<div class="warn">⚠ 有 ' + s.missingRewards +
+          " 笔交易显示积分倍率但结果为 0 分，可能有 PDF 内容流缺失。请勿将本次总额作为最终结果。</div>") +
         '<div class="grid">' +
         '<div class="kpi big"><span>净 ELIGIBLE SPEND</span><strong>' + money(s.netEligibleSpend) + "</strong></div>" +
         '<div class="kpi"><span>Eligible 消费</span><strong>' + money(s.eligibleCharges) + "</strong></div>" +
