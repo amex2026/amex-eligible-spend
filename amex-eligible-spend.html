@@ -531,31 +531,24 @@
           }
         }
       });
-      // Refund rows are labelled "Credit" instead of showing their multiplier.
-      // Infer an integer multiplier from the negative amount before falling back
-      // to queue order, otherwise small unrelated refunds can steal the value.
+      // Rows without a printed multiplier (especially "Credit" refunds and 1X
+      // purchases) may only claim a value when amount × an integer multiplier
+      // explains it. Never assign leftover values by position: PDF object order
+      // is unstable and that would turn unrelated no-points rows into eligible.
       pending.forEach(function (t) {
-        if (t.points !== 0 || t.multiplier !== null || t.amount >= 0) return;
+        if (t.points !== 0 || t.multiplier !== null) return;
         for (var mult = 1; mult <= 20 && t.points === 0; mult++) {
-          var expected = -Math.round(Math.abs(t.amount) * mult);
+          var expected = Math.round(Math.abs(t.amount) * mult);
+          if (t.amount < 0) expected = -expected;
           for (var i = 0; i < deferred.length; i++) {
-            if (!used[i] && deferred[i] < 0 && Math.abs(deferred[i] - expected) <= 1) {
+            if (!used[i] && Math.sign(deferred[i]) === Math.sign(t.amount) &&
+                Math.abs(deferred[i] - expected) <= 1) {
               t.points = deferred[i];
               t.eligible = true;
               used[i] = true;
               break;
             }
           }
-        }
-      });
-      var next = 0;
-      pending.forEach(function (t) {
-        if (t.points !== 0) return;
-        while (next < deferred.length && used[next]) next++;
-        if (next < deferred.length) {
-          t.points = deferred[next];
-          t.eligible = deferred[next] !== 0;
-          used[next++] = true;
         }
       });
     }
