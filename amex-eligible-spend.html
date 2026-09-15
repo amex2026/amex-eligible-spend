@@ -474,26 +474,49 @@
     return d >= 5 && a >= 5;
   }
 
+  function hasRewardsProgramDetails(text) {
+    return text.split(/\r?\n/).some(function (line) {
+      line = line.trim();
+      return line && /\S\s+\S/.test(line) &&
+        POINTS_HEADER.test(line) && POINTS_WORD.test(line);
+    });
+  }
+
+  function unsupportedActivity(message) {
+    return {
+      transactions: [],
+      summary: {
+        format: "activity",
+        unsupported: true,
+        message: message,
+        transactions: 0,
+        amountLines: 0,
+        complete: false,
+        eligibleCount: 0,
+        eligibleCharges: 0,
+        eligibleRefunds: 0,
+        netEligibleSpend: 0,
+        netPoints: 0
+      }
+    };
+  }
+
   function analyze(text) {
     if (isActivityFormat(text)) {
-      return {
-        transactions: [],
-        summary: {
-          format: "activity",
-          unsupported: true,
-          message: "这是手机版 Print 出来的 Account Activity 活动页，缺少 1X 等积分明细，" +
-            "无法算全 eligible spend。请用电脑网页版：Statements & Activity → 选一期已出账单 → " +
-            "Print（不要 Download）→ 勾 Additional Details。",
-          transactions: 0,
-          amountLines: 0,
-          complete: false,
-          eligibleCount: 0,
-          eligibleCharges: 0,
-          eligibleRefunds: 0,
-          netEligibleSpend: 0,
-          netPoints: 0
-        }
-      };
+      return unsupportedActivity(
+        "这是手机版 Print 出来的 Account Activity 活动页，缺少 1X 等积分明细，" +
+        "无法算全 eligible spend。请用电脑网页版：Statements & Activity → 选一期已出账单 → " +
+        "Print（不要 Download）→ 勾 Additional Details。"
+      );
+    }
+    var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
+    if (amountLines && /Card Activity from\b/i.test(text) && !hasRewardsProgramDetails(text)) {
+      return unsupportedActivity(
+        "这份 Card Activity PDF 虽然能读出交易，但文件中没有任何积分数值，" +
+        "因此无法判断哪些消费属于 eligible spend。请在电脑网页版打开已出账单，" +
+        "Print（不要打印当前 Activity 日期范围）并勾选 Additional Details；" +
+        "确认预览中能看到 MARRIOTT BONVOY POINTS、MEMBERSHIP REWARDS POINTS 或 Miles 及具体数值。"
+      );
     }
     var txns = [];
     splitBlocks(text).forEach(function (b) {
@@ -550,7 +573,6 @@
       delete t.needsDeferred;
       delete t.multiplier;
     });
-    var amountLines = (text.match(/^-?\$[\d,]+\.\d{2}$/gm) || []).length;
     return finish(txns, amountLines, "statement", unmatchedRewards, missingRewards);
   }
 
