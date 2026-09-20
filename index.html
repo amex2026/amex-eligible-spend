@@ -45,7 +45,7 @@
 </head>
 <body>
 <h1>Amex Eligible Spend</h1>
-<div class="sub" id="release-info">本版本发布时间：<time id="release-time" datetime="2026-09-15T07:33:41.974Z">2026-09-15 07:33:41 UTC</time></div>
+<div class="sub" id="release-info">本版本发布时间：<time id="release-time" datetime="2026-09-20T10:24:36.656Z">2026-09-20 10:24:36 UTC</time></div>
 <div class="sub">把 American Express 的 <em>账单 PDF</em> 拖到下面，自动算出这期有多少 eligible spend。<br>
   规则：有积分的交易算 eligible，积分为负（退款/商户 credit）则从合计中扣减，无积分的交易剔除。<br>
   <b>全部在本地计算</b> —— 不上传、无服务器、断网也能用。</div>
@@ -318,6 +318,8 @@
 
   function splitBlocks(text) {
     var blocks = [], cur = null;
+    // Narrow date columns can wrap the abbreviated month and day separately.
+    text = text.replace(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[ \t]*\r?\n[ \t]*(\d{1,2})[ \t]*$/gm, "$1 $2");
     text.split(/\r?\n/).forEach(function (line) {
       line = line.replace(/\s+$/, "");
       if (DATE.test(line)) {
@@ -401,7 +403,12 @@
         var m = /^\d+X\b.*\s(-?[\d,]+)$/i.exec(l);
         if (!m) m = /(?:debited|merchant credit)\s+(-?[\d,]+)$/i.exec(l);
         if (m) value = m[1];
-        else words.push(l);
+        else if (!l || /^(?:\d+X\b|on\b|(?:Points|Miles) debited\b|return\b|or\b|merchant\b|credit\b)/i.test(l)) {
+          words.push(l);
+        } else {
+          // An itinerary date or phone number is not a rewards value.
+          break;
+        }
       }
     }
     if (value === null) return { points: 0, hasHeader: true };
@@ -421,7 +428,10 @@
     if (amount === null) return null;
     var desc = "";
     for (var j = 1; j < block.length; j++) {
-      if (!NOISE.test(block[j]) && !AMOUNT.test(block[j])) { desc = block[j]; break; }
+      var descriptionLine = block[j].trim();
+      if (descriptionLine && !NOISE.test(descriptionLine) && !AMOUNT.test(descriptionLine)) {
+        desc = descriptionLine; break;
+      }
     }
     var posted = "";
     for (var p = 1; p < block.length; p++) {
@@ -574,10 +584,12 @@
       delete t.needsDeferred;
       delete t.multiplier;
     });
-    return finish(txns, amountLines, "statement", unmatchedRewards, missingRewards);
+    var declared = /^\s*([\d,]+)\s+Transactions\s*$/im.exec(text);
+    var declaredTransactions = declared ? parseInt(declared[1].replace(/,/g, ""), 10) : null;
+    return finish(txns, amountLines, "statement", unmatchedRewards, missingRewards, declaredTransactions);
   }
 
-  function finish(txns, amountLines, format, unmatchedRewards, missingRewards) {
+  function finish(txns, amountLines, format, unmatchedRewards, missingRewards, declaredTransactions) {
     unmatchedRewards = unmatchedRewards || 0;
     missingRewards = missingRewards || 0;
     var eligible = txns.filter(function (t) { return t.eligible; });
@@ -588,7 +600,9 @@
         format: format,
         transactions: txns.length,
         amountLines: amountLines,
-        complete: amountLines === txns.length && unmatchedRewards === 0 && missingRewards === 0,
+        declaredTransactions: declaredTransactions,
+        complete: amountLines === txns.length && unmatchedRewards === 0 && missingRewards === 0 &&
+          (declaredTransactions === null || declaredTransactions === txns.length),
         unmatchedRewards: unmatchedRewards,
         missingRewards: missingRewards,
         eligibleCount: eligible.length,
@@ -654,6 +668,15 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
           '<div class="warn">⚠ ' + esc(s.message) + "</div></div>";
         return;
       }
+      if (!s.complete) {
+        html += '<div class="card"><h1 style="font-size:16px">' + esc(r.name) + "</h1>" +
+          '<div class="warn">解析不完整，暂不显示总额或导出 CSV，避免把漏读积分当成无积分。' +
+          "已读取 " + s.transactions + " 笔，金额行 " + s.amountLines +
+          (s.declaredTransactions === null ? "" : "，PDF 标明 " + s.declaredTransactions + " 笔") +
+          "；积分未匹配 " + s.unmatchedRewards + " 笔，倍率有但积分缺失 " + s.missingRewards +
+          " 笔。</div></div>";
+        return;
+      }
       html += '<div class="card"><div class="row"><h1 style="font-size:16px;flex:1">' + esc(r.name) + "</h1>" +
         '<button class="ghost" data-csv="' + idx + '">导出 CSV</button></div>' +
         (s.transactions === s.amountLines ? "" : '<div class="warn">⚠ 只解析出 ' + s.transactions + " of " + s.amountLines +
@@ -692,8 +715,8 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
       html += "</table></details></div>";
     });
 
-    var ok = results.filter(function (r) { return !r.summary.unsupported; });
-    if (ok.length > 1) {
+    var ok = results.filter(function (r) { return !r.summary.unsupported && r.summary.complete; });
+    if (ok.length > 1 && ok.length === results.length) {
       var total = ok.reduce(function (a, r) { return a + r.summary.netEligibleSpend; }, 0);
       html += '<div class="card"><div class="kpi big"><span>合计净 ELIGIBLE SPEND</span><strong>' +
         money(Math.round(total * 100) / 100) + "</strong></div></div>";
