@@ -45,7 +45,7 @@
 </head>
 <body>
 <h1>Amex Eligible Spend</h1>
-<div class="sub" id="release-info">本版本发布时间：<time id="release-time" datetime="2026-09-20T10:24:36.656Z">2026-09-20 10:24:36 UTC</time></div>
+<div class="sub" id="release-info">本版本发布时间：<time id="release-time" datetime="2026-09-24T07:51:53.460Z">2026-09-24 07:51:53 UTC</time></div>
 <div class="sub">把 American Express 的 <em>账单 PDF</em> 拖到下面，自动算出这期有多少 eligible spend。<br>
   规则：有积分的交易算 eligible，积分为负（退款/商户 credit）则从合计中扣减，无积分的交易剔除。<br>
   <b>全部在本地计算</b> —— 不上传、无服务器、断网也能用。</div>
@@ -104,10 +104,26 @@
     var re = /(\d+)\s+(\d+)\s+obj\b([\s\S]*?)\bendobj/g, m;
     while ((m = re.exec(raw))) {
       var num = parseInt(m[1], 10), body = m[3];
-      var sm = /stream\r?\n([\s\S]*?)\r?\nendstream/.exec(body);
+      var sm = /\bstream\r?\n/.exec(body);
       var stream = null;
       if (sm) {
-        stream = /FlateDecode/.test(body) ? await inflate(fromLatin1(sm[1])) : sm[1];
+        var start = sm.index + sm[0].length;
+        var header = body.slice(0, sm.index);
+        var length = /\/Length\s+(\d+)(?:\s+(\d+)\s+R)?\b/.exec(header);
+        var payload;
+        if (length && length[2] === undefined) {
+          // A trailing CR byte can belong to compressed data, not the EOL.
+          var end = start + Number(length[1]);
+          if (end > body.length || !/^(?:\r\n|\r|\n)?endstream\b/.test(body.slice(end))) {
+            throw new Error("Invalid PDF stream length in object " + num);
+          }
+          payload = body.slice(start, end);
+        } else {
+          var legacy = /^([\s\S]*?)\r?\nendstream\b/.exec(body.slice(start));
+          if (!legacy) throw new Error("Missing PDF stream boundary in object " + num);
+          payload = legacy[1];
+        }
+        stream = /FlateDecode/.test(header) ? await inflate(fromLatin1(payload)) : payload;
       }
       objs.set(num, { body: body, stream: stream });
     }
@@ -651,7 +667,7 @@ if (typeof module !== "undefined" && module.exports) module.exports = globalThis
         return s;
       } catch (e) { /* try next format */ }
     }
-    return "";
+    throw new Error("PDF 压缩内容解码失败，已停止计算，避免漏读交易。");
   }
 
   var money = function (n) {
